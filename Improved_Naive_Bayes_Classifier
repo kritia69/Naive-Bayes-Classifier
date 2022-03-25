@@ -1,0 +1,155 @@
+library(tidyverse)
+library(tm)
+library(wordcloud)
+library(e1071)
+library(caret)
+library(gplots)
+library(caret)
+library(meltr)
+library(stringr)
+library(udpipe)
+library(ROCR)
+library(ggplot2)
+##Load the data from csv file
+
+stock_data<-read.csv("C:/Users/Admin/Desktop/M.tech/stock_data.csv", sep = ",", 
+                     col.names = c("text", "sentiment"))
+
+##Label the sentiments as negative and positive
+stock_data$sentiment<- factor(stock_data$sentiment, levels = c(-1, 1),
+                              labels = c("0", "1"))
+
+data.frame <- stock_data
+
+# Shuffle rows in dataframe
+set.seed(1985)
+data.frame <- data.frame[order(runif(n=5791)),]
+
+summary(data.frame)
+head(data.frame)
+
+corpus <- Corpus(VectorSource(data.frame$text))
+
+inspect(corpus[1:5])
+
+# First...
+clean.corpus <- tm_map(corpus, tolower)
+clean.corpus <- tm_map(clean.corpus, removeNumbers)
+
+
+# Second...
+clean.corpus <- tm_map(clean.corpus, removeWords, stopwords())
+clean.corpus <- tm_map(clean.corpus, removePunctuation)
+
+# Third...
+removeURL <- content_transformer(function(x) gsub("(f|ht)tp(s?)://\\S+", "", x, perl = T))
+clean.corpus <- tm_map(clean.corpus, stripWhitespace)
+clean.corpus <- tm_map(clean.corpus, removeURL)
+
+clean.corpus.dtm <- DocumentTermMatrix(clean.corpus)
+
+## Removing terms with TF-IDF cutoff = 1.1
+dtm<- document_term_matrix(clean.corpus.dtm)
+tfidf<-dtm_tfidf(dtm)
+rem_tfidf <- dtm_remove_tfidf(dtm, cutoff = 1.1)
+dim(rem_tfidf)
+clean.corpus.dtm<-rem_tfidf
+
+##chi square test
+
+dtm<- document_term_matrix(clean.corpus.dtm)
+relevant <- dtm_chisq(dtm, groups = dtm[, "aap"] > 0)
+head(relevant, 10)
+chisqdata <- filter(relevant, chisq<0.04918127)
+remterms <- c(chisqdata$term)
+temp<-dtm_remove_terms(dtm, remterms)
+clean.corpus.dtm <- temp
+
+## removing sparse terms
+
+clean.corpus.dtm <- removeSparseTerms(clean.corpus.dtm, sparse=0.99)
+
+## removing terms with document frequency = 5-90 and word length = 5-15
+
+clean.corpus.dtm <-DocumentTermMatrix(clean.corpus, control=list(wordLengths=c(5, 15), bounds = list(global = c(5,90))))
+
+##split the data into train and test dataset
+n <- nrow(data.frame)
+raw.text.train <- data.frame[1:round(.8 * n),]
+raw.text.test  <- data.frame[(round(.8 * n)+1):n,]
+
+nn <- length(clean.corpus)
+clean.corpus.train <- clean.corpus[1:round(.8 * nn)]
+clean.corpus.test  <- clean.corpus[(round(.8 * nn)+1):nn]
+
+nnn <- nrow(clean.corpus.dtm)
+clean.corpus.dtm.train <- clean.corpus.dtm[1:round(.8 * nnn),]
+clean.corpus.dtm.test  <- clean.corpus.dtm[(round(.8 * nnn)+1):nnn,]
+
+## wordcloud for the dataset
+wordcloud(clean.corpus.train, min.freq = 30, random.order = FALSE)
+
+## wordcloud for positive tweets
+positive <- subset(raw.text.train, sentiment == "1")
+wordcloud(positive$text, max.words = 30, scale = c(3, 0.5))
+
+## wordcloud for negative tweets
+negative <- subset(raw.text.train, sentiment == "0")
+wordcloud(negative$text, max.words = 30, scale = c(3, 0.5))
+
+## remove terms with frequency = 3
+
+freq.terms <- findFreqTerms(clean.corpus.dtm.train, 3)
+
+clean.corpus.dtm.freq.train <- DocumentTermMatrix(clean.corpus.train, list(dictionary = freq.terms))
+clean.corpus.dtm.freq.test  <- DocumentTermMatrix(clean.corpus.test, list(dictionary = freq.terms))
+
+## use the code when no frequency terms have to be removed
+clean.corpus.dtm.freq.train <- DocumentTermMatrix(clean.corpus.train)
+clean.corpus.dtm.freq.test  <- DocumentTermMatrix(clean.corpus.test)
+
+convert_counts <- function(x) {
+  x <- ifelse(x > 0, 1, 0)
+  x <- factor(x, levels = c(0, 1), labels = c("No", "Yes"))
+  return(x)
+}
+
+clean.corpus.dtm.freq.train <- apply(clean.corpus.dtm.freq.train, MARGIN = 2, convert_counts)
+clean.corpus.dtm.freq.test  <- apply(clean.corpus.dtm.freq.test, MARGIN = 2, convert_counts)
+
+# Constructing model and making prediction
+text.classifer <- naiveBayes(clean.corpus.dtm.freq.train, raw.text.train$sentiment)
+text.pred <- predict(text.classifer, clean.corpus.dtm.freq.test)
+
+##plot ROC curve
+predvec <- ifelse(text.pred =="1", 1, 0)
+realvec <- ifelse(raw.text.test$sentiment == "1", 1, 0)
+pred <- prediction(predvec, realvec)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf, main = "ROC curve for Naive Bayes Classifier",col = "blue", lwd = 3)
+abline(a = 0, b = 1, lwd = 2, lty = 2)
+
+tp<-table("Predictions" = text.pred, "Actual" = raw.text.test$sentiment)
+tp
+conf_mat <- confusionMatrix(text.pred, raw.text.test$sentiment)
+confusionMatrix(tp)
+
+
+conf_mat$overall['Accuracy']
+
+accuracies <- c(70.12, 72.79, 74.00, 73.83, 71.67, 68.65, 70.12, 68.65, 70.12, 65.45)
+par(las=2)
+axis(2, at=seq(0,20,15))
+par(mar = c(8, 9, 8, 8))
+
+ barplot(accuracies, 
+        main = "Comparison of Accuracies", 
+        xlab = "Accuracies (in %)", 
+        ylab = "",
+        cex.names = 0.8,
+        xlim = range(pretty(c(0,80))),
+        horiz = TRUE,
+        names.arg = c("Pre-Processed Data", "Laplace=1","Min. Freq = 3",
+                      "Min. Freq. = 5", "Min. Freq. = 10",
+                      "Sparsity = 0.99", "TF-IDF", "Chisq Score<0.1584780",
+                      "chisq score<0.04918127", "Doc. Freq.& Word Count"))
